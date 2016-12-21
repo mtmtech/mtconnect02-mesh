@@ -1,0 +1,687 @@
+From 781f97e1cf32130dcd03bde222c89b605767834e Mon Sep 17 00:00:00 2001
+From: Kimi Shen <kimi.shen@mtmtech.com.tw>
+Date: Wed, 21 Dec 2016 16:27:01 +0800
+Subject: [PATCH] for patch
+
+---
+ .../CSRMeshTempSensor/CSRMeshTempSensor.xip        |   2 +
+ .../CSRMeshTempSensor/csr_mesh_tempsensor.c        |  20 ++-
+ applications/CSRMeshTempSensor/gap_service.c       |   2 +-
+ applications/CSRMeshTempSensor/i2c_comms.c         |  61 ++++++-
+ applications/CSRMeshTempSensor/i2c_comms.h         |   5 +-
+ applications/CSRMeshTempSensor/iot_hw.h            |   2 +-
+ .../CSRMeshTempSensor/sht25_temperature_sensor.c   | 200 +++++++++++++++++++++
+ .../CSRMeshTempSensor/sht25_temperature_sensor.h   |  79 ++++++++
+ applications/CSRMeshTempSensor/tempsensor_hw.c     |  36 +++-
+ applications/CSRMeshTempSensor/user_config.h       |  11 +-
+ 10 files changed, 402 insertions(+), 16 deletions(-)
+ create mode 100644 applications/CSRMeshTempSensor/sht25_temperature_sensor.c
+ create mode 100644 applications/CSRMeshTempSensor/sht25_temperature_sensor.h
+
+diff --git a/applications/CSRMeshTempSensor/CSRMeshTempSensor.xip b/applications/CSRMeshTempSensor/CSRMeshTempSensor.xip
+index 2300868..3865980 100644
+--- a/applications/CSRMeshTempSensor/CSRMeshTempSensor.xip
++++ b/applications/CSRMeshTempSensor/CSRMeshTempSensor.xip
+@@ -14,6 +14,7 @@
+   <file path="tempsensor_hw.c" />
+   <file path="stts751_temperature_sensor.c" />
+   <file path="app_data_stream.c" />
++  <file path="sht25_temperature_sensor.c" />
+  </folder>
+  <folder name="Header Files" >
+   <extension name="h" />
+@@ -39,6 +40,7 @@
+   <file path="i2c_comms.h" />
+   <file path="stts751_temperature_sensor.h" />
+   <file path="app_data_stream.h" />
++  <file path="sht25_temperature_sensor.h" />
+  </folder>
+  <folder name="Assembler Files" >
+   <extension name="asm" />
+diff --git a/applications/CSRMeshTempSensor/csr_mesh_tempsensor.c b/applications/CSRMeshTempSensor/csr_mesh_tempsensor.c
+index 2185f52..0ad16c1 100644
+--- a/applications/CSRMeshTempSensor/csr_mesh_tempsensor.c
++++ b/applications/CSRMeshTempSensor/csr_mesh_tempsensor.c
+@@ -285,6 +285,8 @@ typedef struct
+ #define MAX_NO_RESPONSE_COUNT          (5)
+ #endif /* ENABLE_ACK_MODE */
+ 
++#define ENABLE_SENDVALUE_GROUP0_IF_NOT_GROUPED
++
+ /*============================================================================*
+  *  Public Data
+  *============================================================================*/
+@@ -319,7 +321,7 @@ CSR_MESH_APPEARANCE_T device_appearance = {APPEARANCE_ORG_BLUETOOTH_SIG,
+                                          APPEARANCE_CSR_MESH_TEMP_SENSOR_VALUE};
+ 
+ /* Device Short name */
+-uint8 short_name[9] = "Sensor";
++uint8 short_name[9] = "Env";
+ 
+ /*============================================================================*
+  *  Private Data
+@@ -1027,6 +1029,18 @@ static void writeTempValue(void)
+                                  &g_tsapp_data.sensor_data);
+             }
+         }
++#ifdef ENABLE_SENDVALUE_GROUP0_IF_NOT_GROUPED
++        if(!IsSensorConfigured() &&
++           current_air_temp != 0 &&
++           current_desired_air_temp != 0)
++        {
++            SensorWriteValue(0x0000, 
++                             ack_reqd, 
++                             type,
++                             2,
++                             &g_tsapp_data.sensor_data);
++        }
++#endif
+     }
+ }
+ 
+@@ -2984,11 +2998,13 @@ void AppInit(sleep_state last_sleep_state)
+     {
+         initiateAssociation();
+     }
++#ifndef ENABLE_SENDVALUE_GROUP0_IF_NOT_GROUPED
+     else
+     {
+         DEBUG_STR("Temperature Sensor is associated\r\n");
+        if(IsSensorConfigured())
+        {
++#endif
+             param.scan_duty_cycle = DEFAULT_RX_DUTY_CYCLE;
+             DEBUG_STR("Temp Sensor Configured, Moving to Low Power Mode\r\n");
+ 
+@@ -3006,8 +3022,10 @@ void AppInit(sleep_state last_sleep_state)
+             {
+                 startRepeatIntervalTimer();
+             }
++#ifndef ENABLE_SENDVALUE_GROUP0_IF_NOT_GROUPED
+         }
+     }
++#endif
+     /* Set the Advertising and Scan parameters */
+     CsrMeshSetAdvScanParam(&param);
+ 
+diff --git a/applications/CSRMeshTempSensor/gap_service.c b/applications/CSRMeshTempSensor/gap_service.c
+index 1af19d1..249a664 100644
+--- a/applications/CSRMeshTempSensor/gap_service.c
++++ b/applications/CSRMeshTempSensor/gap_service.c
+@@ -58,7 +58,7 @@ static GAP_DATA_T g_gap_data;
+ /* Default device name - Added two for storing AD Type and Null ('\0') */
+ uint8 g_device_name[DEVICE_NAME_MAX_LENGTH + 2] = {
+ AD_TYPE_LOCAL_NAME_COMPLETE,
+-'C', 'S', 'R', 'm', 'e', 's', 'h', '\0'};
++'M', 't', 'C', 'o', 'n', 'n', 'e', 'c', '0', '2', ' ', 'e', 'n', 'v', '\0'};
+ 
+ /*============================================================================*
+  *  Private Definitions
+diff --git a/applications/CSRMeshTempSensor/i2c_comms.c b/applications/CSRMeshTempSensor/i2c_comms.c
+index d005f23..faee544 100644
+--- a/applications/CSRMeshTempSensor/i2c_comms.c
++++ b/applications/CSRMeshTempSensor/i2c_comms.c
+@@ -22,7 +22,6 @@
+  *  Local Header Files
+  *============================================================================*/
+ #include "i2c_comms.h"
+-#include "user_config.h"
+ 
+ /*=============================================================================
+  *  Private Data Type
+@@ -86,8 +85,7 @@ extern bool I2CAcquire(void)
+ extern void I2CRelease(void)
+ {
+     bus_I2C_status = i2c_bus_released;
+-    I2cEnable(FALSE);
+-    PioSetI2CPullMode(pio_i2c_pull_mode_strong_pull_down);
++    I2cReset();
+ }
+ 
+ /*----------------------------------------------------------------------------*
+@@ -95,7 +93,7 @@ extern void I2CRelease(void)
+  *      I2CcommsInit
+  *
+  *  DESCRIPTION
+- *      This function initialises the I2C
++ *      This function initializes the I2C
+  *
+  *  RETURNS
+  *      Nothing
+@@ -116,6 +114,35 @@ extern void I2CcommsInit(void)
+     I2cEnable(TRUE);
+ }
+ 
++extern void I2CcommsInitWithPio(uint8 sda_pio, uint8 scl_pio)
++{
++    PioSetModes(    ((0x01L << sda_pio) | (0x01L << scl_pio)), 
++                                            pio_mode_user);
++
++    /* Configure the PIOs as Input */
++    PioSetDirs(     ((0x01L << sda_pio) | (0x01L << scl_pio)), 
++                                            FALSE);
++    PioSetPullModes(((0x01L << sda_pio) | (0x01L << scl_pio)), 
++                                            pio_mode_strong_pull_down); 
++    PioSetEventMask(((0x01L << sda_pio) | (0x01L << scl_pio)), 
++                                            pio_event_mode_disable);
++
++    /* Configure the I2C controller */
++    I2cInit(sda_pio,
++            scl_pio,
++            I2C_POWER_PIO_UNDEFINED,
++            pio_i2c_pull_mode_strong_pull_up);
++
++    /* Configure pull mode of the I2C pins */
++    PioSetI2CPullMode(pio_i2c_pull_mode_strong_pull_up);
++
++    /* Configure the I2C clock */
++    I2cConfigClock(I2C_SCL_100KBPS_HIGH_PERIOD, I2C_SCL_100KBPS_LOW_PERIOD);
++
++    /* Enable the I2C controller */
++    I2cEnable(TRUE);
++}
++
+ /*-----------------------------------------------------------------------------*
+  *  NAME
+  *      I2CReadRegister
+@@ -228,3 +255,29 @@ extern bool I2CWriteRegister(uint8 base_address, uint8 reg,
+ 
+     return success;
+ }
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      I2CRead
++ *
++ *  DESCRIPTION
++ *      This function read bytes from a specific register in one I2C device
++ *      
++ *
++ *  RETURNS
++ *      Nothing.
++ *
++ *---------------------------------------------------------------------------*/
++extern void I2CRead(uint8 addr, uint8 reg, uint8 length, uint8* buffer, uint16 delay)
++{
++  uint8 CM[4]={addr,reg,addr+1,length};
++  
++    I2cRawStart(TRUE);
++    I2cRawWrite(&CM[0],0x0002);   
++    I2cRawRestart(TRUE);
++    I2cRawWrite(&CM[2],0x0001);
++    TimeDelayUSec(delay);   
++    TimeDelayUSec(delay);
++    I2cRawRead(buffer,length);
++    I2cRawStop(TRUE);
++}
+diff --git a/applications/CSRMeshTempSensor/i2c_comms.h b/applications/CSRMeshTempSensor/i2c_comms.h
+index 273fdd8..8dee79c 100644
+--- a/applications/CSRMeshTempSensor/i2c_comms.h
++++ b/applications/CSRMeshTempSensor/i2c_comms.h
+@@ -34,8 +34,9 @@ extern bool I2CAcquire(void);
+ /* This function releases the I2C bus. */
+ extern void I2CRelease(void);
+ 
+-/* Initialise the I2C */
++/* Initializes the I2C */
+ extern void I2CcommsInit(void);
++extern void I2CcommsInitWithPio(uint8 sda_pio, uint8 scl_pio);
+ 
+ /* Read the specified register (1-byte) from the specified device.
+  * The baseAddress parameter here is the WRITE address for the device.
+@@ -46,6 +47,8 @@ extern bool I2CReadRegister(uint8 base_address, uint8 reg,
+ /* Read a contiguous sequence of registers from the specified device. */
+ extern bool I2CReadRegisters(uint8 base_address, uint8 start_reg,
+                               uint8 num_bytes, uint8 *buffer);
++extern void I2CRead(uint8 base_address, uint8 reg, uint8 length, 
++                              uint8* buffer, uint16 delay);
+ 
+ /* Write one byte of data to the specified register on the specified device. */
+ extern bool I2CWriteRegister(uint8 base_address, uint8 reg,
+diff --git a/applications/CSRMeshTempSensor/iot_hw.h b/applications/CSRMeshTempSensor/iot_hw.h
+index 7180b13..ca77305 100644
+--- a/applications/CSRMeshTempSensor/iot_hw.h
++++ b/applications/CSRMeshTempSensor/iot_hw.h
+@@ -44,7 +44,7 @@
+ 
+ #define SW2_PIO         (1)
+ #define SW3_PIO         (0)
+-#define SW4_PIO         (4)
++#define SW4_PIO         (5)
+ 
+ #define SW2_MASK      PIO_BIT_MASK(SW2_PIO)
+ #define SW3_MASK      PIO_BIT_MASK(SW3_PIO)
+diff --git a/applications/CSRMeshTempSensor/sht25_temperature_sensor.c b/applications/CSRMeshTempSensor/sht25_temperature_sensor.c
+new file mode 100644
+index 0000000..3209fbb
+--- /dev/null
++++ b/applications/CSRMeshTempSensor/sht25_temperature_sensor.c
+@@ -0,0 +1,200 @@
++/******************************************************************************
++ * Copyright (c) 2016 MtM Technology Corporation, MIT License
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software 
++ * and associated documentation files (the "Software"), to deal in the Software without restriction, 
++ * including without limitation the rights to use, copy, modify, merge, publish, distribute, 
++ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is 
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all copies or 
++ * substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
++ * BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND 
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, 
++ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ *****************************************************************************/
++
++/*============================================================================*
++ *  SDK Header Files
++ *============================================================================*/
++#include <types.h>
++#include <macros.h>
++
++/*============================================================================*
++ *  Local Header Files
++ *============================================================================*/
++#include "sht25_temperature_sensor.h"
++#include "app_debug.h"
++
++#ifdef TEMPERATURE_SENSOR_SHT25
++/*============================================================================*
++ *  Private Function Implementations
++ *============================================================================*/
++static void DebugWriteDec(int val)
++{
++    if(val >= 10)
++    {
++        DebugWriteDec(val / 10);
++    }
++    DebugWriteChar(('0' + (val % 10)));
++}
++
++/*============================================================================*
++ *  Public Function Implementations
++ *============================================================================*/
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      SHT25Temp_Init
++ *
++ *  DESCRIPTION
++ *      This function initialises the temperature sensor STTS751
++ *
++ *  RETURNS
++ *      TRUE if success.
++ *
++ *---------------------------------------------------------------------------*/
++extern bool SHT25Temp_Init(void)
++{
++#ifndef HUMIDITY_SENSOR_SHT25
++    bool success = FALSE;
++
++    /* Acquire I2C bus */
++    if(I2CAcquire())
++    {
++        /* Initialise I2C communication. */
++        I2CcommsInitWithPio(I2C_SDA_PIO, I2C_SCL_PIO);
++
++        /* Configure the Humidity sensor */
++        /* After startup, the sensor needs at most 15ms for reaching Idle 
++         * state, i.e. to be ready accepting commands 
++         */
++        TimeDelayUSec(15 * MILLISECOND);
++
++        /* Default configuration for SHT25 sensor is 12 bit resolution. we 
++         * don't want to change that. Don't disturb the User Register.
++         */
++        success = TRUE;
++
++        /* Release the I2C bus */
++        I2CRelease();
++    }
++    return success;
++#else
++    return TRUE;
++#endif
++}
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      SHT25Temp_Calibration
++ *
++ *  DESCRIPTION
++ *      This function calibrates the temperature sensor STTS751.
++ *
++ *  RETURNS
++ *      Nothing.
++ *
++ *---------------------------------------------------------------------------*/
++extern void SHT25Temp_Calibration(void)
++{
++}
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      SHT25Temp_ReadBlocking
++ *
++ *  DESCRIPTION
++ *      This function reads data from the temperature sensor STTS751. This 
++ *      function gives temperature value in units of degrees Celsius with a 
++ *      resolution of 0.01 degrees Celsius.
++ *
++ *  RETURNS
++ *      TRUE if read succeeds.
++ *
++ *---------------------------------------------------------------------------*/
++extern bool SHT25Temp_ReadBlocking(int16 *p_temperature)
++{
++    
++    uint32 temp = 0;  /* Temperature value requires only 16bits but to 
++                       * avoid overflow while doing calculations, the 
++                       * value has been defined as uint32.
++                       */
++    int16 data = 0;
++    uint8 value[3] = {0};
++
++    if(I2CAcquire())
++    {
++        /* Initialise I2C */
++        I2CcommsInitWithPio(I2C_SDA_PIO, I2C_SCL_PIO);
++ 
++        /* Write command for temperature measurement in Hold mode */
++        I2CRead(SHT25_I2C_ADDRESS,SHT25_TRIGGER_T_MEASUREMENT_HOLD_MODE,0x03,value,40 * MILLISECOND); 
++        temp = (uint32)((value[0]<<8) | value[1]);
++        temp = temp * 17572;
++        temp = temp >> 16;
++        data = (int16)temp - 4685;
++        DEBUG_STR("\r\nRead Temp value :");   
++        DebugWriteDec(data/100);
++        DEBUG_STR(".");
++        DebugWriteDec(data%100);
++        DEBUG_STR(" C\r\n");
++        data = data /10;
++        *p_temperature = data;
++
++        /* Release the I2C bus */
++        I2CRelease();
++    }
++    
++    return TRUE;
++}
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      SHT25Temp_ReadCallback
++ *
++ *  DESCRIPTION
++ *      This function implements the callback function for read operation.
++ *
++ *  RETURNS
++ *      Nothing
++ *
++ *---------------------------------------------------------------------------*/
++extern void SHT25Temp_ReadCallback(void)
++{
++}
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      SHT25Temp_ShutDown
++ *
++ *  DESCRIPTION
++ *      This function shuts down the temperature sensor STTS751
++ *
++ *  RETURNS
++ *      Nothing
++ *
++ *---------------------------------------------------------------------------*/
++extern void SHT25Temp_ShutDown(void)
++{
++}
++
++/*----------------------------------------------------------------------------*
++ *  NAME
++ *      STTS751_InterruptHandler
++ *
++ *  DESCRIPTION
++ *      This function handles the interrupt from temperature sensor STTS751
++ *
++ *  RETURNS
++ *      Nothing
++ *
++ *---------------------------------------------------------------------------*/
++extern void SHT25Temp_InterruptHandler(void)
++{
++}
++
++#endif /* TEMPERATURE_SENSOR_SHT25 */
+diff --git a/applications/CSRMeshTempSensor/sht25_temperature_sensor.h b/applications/CSRMeshTempSensor/sht25_temperature_sensor.h
+new file mode 100644
+index 0000000..5eb259f
+--- /dev/null
++++ b/applications/CSRMeshTempSensor/sht25_temperature_sensor.h
+@@ -0,0 +1,79 @@
++/******************************************************************************
++ * Copyright (c) 2016 MtM Technology Corporation, MIT License
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software 
++ * and associated documentation files (the "Software"), to deal in the Software without restriction, 
++ * including without limitation the rights to use, copy, modify, merge, publish, distribute, 
++ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is 
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all copies or 
++ * substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
++ * BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND 
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, 
++ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ *****************************************************************************/
++
++#ifndef __SHT25_TEMPERATURE_SENSOR_H__
++#define __SHT25_TEMPERATURE_SENSOR_H__
++
++/*============================================================================*
++ *  SDK Header Files
++ *============================================================================*/
++#include <types.h>
++
++/*============================================================================*
++ *  local Header Files
++ *============================================================================*/
++#include "user_config.h"
++#include "i2c_comms.h"
++
++#ifdef TEMPERATURE_SENSOR_SHT25
++/*============================================================================*
++ *  Public Definitions
++ *============================================================================*/
++#define SHT25_I2C_ADDRESS                               (0x80)
++
++#define SHT25_TRIGGER_T_MEASUREMENT_HOLD_MODE           (0xE3)
++#define SHT25_TRIGGER_RH_MEASUREMENT_HOLD_MODE          (0xE5)
++#define SHT25_TRIGGER_T_MEASUREMENT_NO_HOLD_MODE        (0xF3)
++#define SHT25_TRIGGER_RH_MEASUREMENT_NO_HOLD_MODE       (0xF5)
++#define SHT25_WRITE_USER_REGISTER                       (0xE6)
++#define SHT25_READ_USER_REGISTER                        (0xE7)
++#define SHT25_SOFT_RESET                                (0xFE)
++
++/* Maximum conversion time in milliseconds
++ * Conversion times for the SHT25 sensor
++ */
++#define MAX_CONVERSION_TIME             (50)
++
++/* Invalid temperature. */
++#define INVALID_TEMPERATURE             ((int16)0xFFFF)
++
++/*============================================================================*
++ *  Public Function Prototypes
++ *============================================================================*/
++/* This function initialises the temperature sensor STTS751 */
++extern bool SHT25Temp_Init(void);
++
++/* This function calibrates the temperature sensor STTS751. */
++extern void SHT25Temp_Calibration(void);
++
++/* This function reads data from the temperature sensor STTS751 */
++extern bool SHT25Temp_ReadBlocking(int16 *p_temperature);
++
++/* This function implements the callback function for read operation.*/
++extern void SHT25Temp_ReadCallback(void);
++
++/* This function shuts down the temperature sensor STTS751 */
++extern void SHT25Temp_ShutDown(void);
++
++/* This function handles the interrupt from temperature sensor STTS751 */
++extern void SHT25Temp_InterruptHandler(void);
++
++#endif /* TEMPERATURE_SENSOR_SHT25 */
++#endif /* __SHT25_TEMPERATURE_SENSOR_H__ */
+diff --git a/applications/CSRMeshTempSensor/tempsensor_hw.c b/applications/CSRMeshTempSensor/tempsensor_hw.c
+index f11a4cd..8212b0c 100644
+--- a/applications/CSRMeshTempSensor/tempsensor_hw.c
++++ b/applications/CSRMeshTempSensor/tempsensor_hw.c
+@@ -26,11 +26,14 @@
+ #include "stts751_temperature_sensor.h"
+ #endif /* TEMPERATURE_SENSOR_STTS751 */
+ 
++#ifdef TEMPERATURE_SENSOR_SHT25
++#include "sht25_temperature_sensor.h"
++#endif /* TEMPERATURE_SENSOR_SHT25 */
+ /*============================================================================*
+  *  Private data
+  *============================================================================*/
+ /* Temperature sensor read delay after issuing read command. */
+-#ifdef TEMPERATURE_SENSOR_STTS751
++#if defined(TEMPERATURE_SENSOR_STTS751) || defined(TEMPERATURE_SENSOR_SHT25)
+ #define TEMP_READ_DELAY         (MAX_CONVERSION_TIME * MILLISECOND)
+ #endif /* TEMPERATURE_SENSOR_STTS751 */
+ 
+@@ -55,6 +58,7 @@ static timer_id read_delay_tid = TIMER_INVALID;
+  *      TRUE if initialization is sucessful.
+  *
+  *----------------------------------------------------------------------------*/
++#ifdef TEMPERATURE_SENSOR_STTS751
+ static void tempSensorReadyToRead(timer_id tid)
+ {
+     int16 temp;
+@@ -63,7 +67,6 @@ static void tempSensorReadyToRead(timer_id tid)
+     {
+         read_delay_tid = TIMER_INVALID;
+ 
+-#ifdef TEMPERATURE_SENSOR_STTS751
+         /* Read the temperature. */
+         STTS751_ReadTemperature(&temp);
+         if (temp != INVALID_TEMPERATURE)
+@@ -73,12 +76,12 @@ static void tempSensorReadyToRead(timer_id tid)
+ 
+             temp += CELSIUS_TO_KELVIN_FACTOR;
+         }
+-#endif /* TEMPERATURE_SENSOR_STTS751 */
+ 
+         /* Report the temperature read. */
+         eventHandler(temp);
+     }
+ }
++#endif /* TEMPERATURE_SENSOR_STTS751 */
+ 
+ /*============================================================================*
+  *  Public Function Implementations
+@@ -107,6 +110,10 @@ extern bool TempSensorHardwareInit(TEMPSENSOR_EVENT_HANDLER_T handler)
+ #ifdef TEMPERATURE_SENSOR_STTS751
+         status = STTS751_Init();
+ #endif /* TEMPERATURE_SENSOR_STTS751 */
++
++#ifdef TEMPERATURE_SENSOR_SHT25
++       status = SHT25Temp_Init();
++#endif /* TEMPERATURE_SENSOR_SHT25 */
+     }
+ 
+     return status;
+@@ -127,13 +134,14 @@ extern bool TempSensorHardwareInit(TEMPSENSOR_EVENT_HANDLER_T handler)
+ extern bool TempSensorRead(void)
+ {
+     bool status = FALSE;
++    int16 temp;
++    uint8 templ;
+ 
++#ifdef TEMPERATURE_SENSOR_STTS751
+     /* Return FALSE if already a read is in progress. */
+     if (TIMER_INVALID == read_delay_tid)
+     {
+-#ifdef TEMPERATURE_SENSOR_STTS751
+         status = STTS751_InitiateOneShotRead();
+-#endif /* TEMPERATURE_SENSOR_STTS751 */
+     }
+ 
+     /* Command is issued without failure, start the delay timer. */
+@@ -142,7 +150,25 @@ extern bool TempSensorRead(void)
+         read_delay_tid = TimerCreate(TEMP_READ_DELAY, TRUE,
+                                      tempSensorReadyToRead);
+     }
++#endif /* TEMPERATURE_SENSOR_STTS751 */
+ 
++#ifdef TEMPERATURE_SENSOR_SHT25
++    /* Read the temperature. */
++    SHT25Temp_ReadBlocking(&temp);
++    if (temp != INVALID_TEMPERATURE)
++    {
++        templ= temp % 10;
++        temp = temp /10;
++        temp = (temp << 4) + (templ&0x0F);
++        /* Convert temperature in to 1/32 degree Centigrade units */
++        temp = (temp << 1);
++
++        temp += CELSIUS_TO_KELVIN_FACTOR;
++    }
++    /* Report the temperature read. */
++    eventHandler(temp);
++    status = TRUE;
++#endif /* TEMPERATURE_SENSOR_SHT25 */
+     return status;
+ }
+ 
+diff --git a/applications/CSRMeshTempSensor/user_config.h b/applications/CSRMeshTempSensor/user_config.h
+index f955a26..2f7c698 100644
+--- a/applications/CSRMeshTempSensor/user_config.h
++++ b/applications/CSRMeshTempSensor/user_config.h
+@@ -23,6 +23,11 @@
+ #define APP_MAJOR_VERSION   (1)
+ #define APP_MINOR_VERSION   (3)
+ 
++/* I2C Communication lines */
++#define I2C_SCL_PIO         (3)
++#define I2C_SDA_PIO         (4)
++
++
+ /* Application NVM version. This version is used to keep the compatibility of
+  * NVM contents with the application version. This value needs to be modified
+  * only if the new version of the application has a different NVM structure
+@@ -77,8 +82,8 @@
+ /* Enables Authorization Code on Device. */
+ /* #define USE_AUTHORIZATION_CODE */
+ 
+-/* STTS751 Temperature Sensor. */
+-#define TEMPERATURE_SENSOR_STTS751
++/* SHT25 Temperature Sensor. */
++#define TEMPERATURE_SENSOR_SHT25
+ 
+ /* Enable battery model support */
+ /* #define ENABLE_BATTERY_MODEL */
+@@ -91,7 +96,7 @@
+ 
+ /* Temperature Sensor Parameters. */
+ /* Temperature Sensor Sampling Interval */
+-#define TEMPERATURE_SAMPLING_INTERVAL  (15 * SECOND)
++#define TEMPERATURE_SAMPLING_INTERVAL  (6 * SECOND)
+ 
+ /* Temperature Controller. */
+ #define ENABLE_TEMPERATURE_CONTROLLER
+-- 
+2.9.3 (Apple Git-75)
+
